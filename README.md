@@ -1,5 +1,9 @@
 # checkfor
 
+[![Go Version](https://img.shields.io/badge/go-1.25.5-blue.svg)](https://go.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Go Report Card](https://goreportcard.com/badge/github.com/YOUR_USERNAME/checkfor)](https://goreportcard.com/report/github.com/YOUR_USERNAME/checkfor)
+
 A lightweight CLI tool for searching files in a directory with JSON output. Designed for token-efficient verification during refactoring tasks.
 
 ## Features
