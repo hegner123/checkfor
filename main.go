@@ -325,7 +325,11 @@ func sendResponse(id any, result any) {
 		ID:      id,
 		Result:  result,
 	}
-	data, _ := json.Marshal(resp)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to marshal response: %v\n", err)
+		return
+	}
 	fmt.Println(string(data))
 }
 
@@ -338,7 +342,11 @@ func sendError(id any, code int, message string) {
 			Message: message,
 		},
 	}
-	data, _ := json.Marshal(resp)
+	data, err := json.Marshal(resp)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to marshal error response: %v\n", err)
+		return
+	}
 	fmt.Println(string(data))
 }
 
@@ -387,7 +395,11 @@ func searchFile(path string, config Config) ([]Match, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to close file %s: %v\n", path, cerr)
+		}
+	}()
 
 	var lines []string
 	scanner := bufio.NewScanner(file)
