@@ -10,7 +10,6 @@ checkfor
 
 # Output of the go coverage tool
 *.out
-coverage.txt
 
 # Go workspace file
 go.work
