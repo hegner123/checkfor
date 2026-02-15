@@ -43,23 +43,24 @@ Update checks are cached in `~/.checkfor-update-cache` to respect GitHub API rat
 
 ### Build
 ```bash
-go build -o checkfor
+just build
 ```
 
 ### Install to System Path
 ```bash
-sudo cp checkfor /usr/local/bin/
+just install
 ```
 
 ### Run Tests
 ```bash
-go test -v
+just test
 ```
 
 Test coverage includes:
 - Core search functions (whole-word matching, context extraction, exclude filtering)
 - File filtering (extension, case-insensitive, whole-word)
 - Filter statistics tracking (original_matches, filtered_matches)
+- Multi-line search (basic, case-insensitive, whole-word, exclude, CRLF, context, multiple occurrences)
 - MCP JSON-RPC protocol compliance
 - Integration tests (multi-directory scanning, non-recursive behavior, per-directory results)
 
@@ -109,16 +110,26 @@ The search flow:
 **Key features:**
 - **Non-recursive**: Only scans immediate directory contents (skips subdirectories)
 - **Multi-directory**: Searches multiple directories in one invocation
+- **Multi-line search**: When the search string contains `\n`, switches to whole-file matching
 - **Exclude filtering**: Filters out matches containing any of the exclude patterns
 - **Filter statistics**: Tracks original_matches (before filtering) and filtered_matches (excluded count)
 - **Extension filtering**: Applied before file reading for efficiency
 - **Per-file searching**: Each file processed independently
 
+**Dual-path search design:**
+
+The search uses two code paths selected automatically by `isMultiline()`:
+
+1. **Single-line path** (default): Reads files line-by-line via `bufio.Scanner`. Matches per-line. Used when search string has no `\n`.
+2. **Multi-line path**: Reads entire file with `os.ReadFile`. Matches against full content. Used when search string contains `\n`.
+
 Key implementation details:
-- Files are read entirely into memory as line slices
-- Whole-word matching uses custom `containsWholeWord()` that checks word boundaries using `isWordChar()` (alphanumeric + underscore)
+- Single-line: files read as line slices; whole-word matching uses `containsWholeWord()`
+- Multi-line: whole-file string matching; whole-word matching uses `indexOfWholeWord()` which checks word boundaries at match edges
+- CRLF handling: multi-line path detects `\r\n` in the file and normalizes search `\n` to `\r\n` before matching
+- Exclude patterns check all lines spanning a multi-line match (consistent with single-line behavior)
 - Context lines extracted via `getContextBefore()` and `getContextAfter()`
-- Case-insensitive search converts both search term and line content to lowercase
+- Case-insensitive search converts both search term and content to lowercase
 - Exclude patterns also respect case-insensitive flag
 
 ### Output Format
@@ -127,6 +138,18 @@ Key implementation details:
 ```json
 {"directories":[{"dir":"./pkg","matches_found":3,"original_matches":5,"filtered_matches":2,"files":[{"path":"user.go","matches":[...]}]}]}
 ```
+
+**Single-line match:**
+```json
+{"line":42,"content":"func main() {"}
+```
+
+**Multi-line match** (includes `end_line`):
+```json
+{"line":42,"end_line":44,"content":"if err != nil {\n\treturn err\n}"}
+```
+
+The `end_line` field is omitted for single-line matches (zero value, `omitempty`).
 
 **Token efficiency:**
 - Compact JSON (no newlines): 41% smaller
@@ -167,7 +190,7 @@ Key types:
   - `FilteredMatches int` - Excluded matches count (omitted if no exclude or hidden)
   - `Files []FileMatch` - File matches with relative paths
 - `FileMatch`: Contains relative file path and array of matches
-- `Match`: Line number, content, and optional context arrays
+- `Match`: Line number, optional end_line (multi-line matches only), content, and optional context arrays
 
 ## Important Notes
 

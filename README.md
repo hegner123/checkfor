@@ -19,13 +19,14 @@ An MCP server tool for searching files in directories with compact JSON output. 
 - **Case-insensitive search** - Optional case-insensitive matching
 - **Whole-word matching** - Avoid false positives from partial matches
 - **Context lines** - Show N lines before/after matches for understanding
+- **Multi-line search** - Search for patterns spanning multiple lines using `\n` in the search string
 
 ## Installation
 
 ### 1. Build from source
 
 ```bash
-go build -o checkfor
+just build
 ```
 
 ### 2. Install to PATH (Required for MCP mode)
@@ -34,7 +35,7 @@ Installing checkfor to your system PATH allows MCP server integration with Claud
 
 **System-wide installation** (recommended):
 ```bash
-sudo cp checkfor /usr/local/bin/
+just install
 ```
 
 **User-local installation** (if you don't have sudo access):
@@ -113,13 +114,13 @@ This helps Claude Code automatically choose the most efficient tool for verifica
 Run tests to verify your installation:
 
 ```bash
-go test -v
+just test
 ```
 
 Run tests with coverage:
 
 ```bash
-go test -v -race -coverprofile="coverage.out" -covermode=atomic
+just test-ci
 ```
 
 ## Updating
@@ -234,6 +235,21 @@ checkfor --cli --dir ./services --search "deprecated" --context 2
 checkfor --cli --search "old" --exclude "older" --hide-filter-stats
 ```
 
+### Multi-line search (MCP mode via JSON)
+
+In MCP mode, include `\n` in the search string to match across lines:
+
+```json
+{
+  "search": "if err != nil {\n\treturn err\n}"
+}
+```
+
+In CLI mode, multi-line searches require shell escaping:
+```bash
+checkfor --cli --search $'if err != nil {\n\treturn err\n}'
+```
+
 ## Best Practices
 
 - **Plan verification steps:** Include specific checkfor searches in your refactoring plans
@@ -313,8 +329,9 @@ The tool outputs compact JSON with per-directory results for optimal AI consumpt
 - `matches` - Array of match objects
 
 **Per Match:**
-- `line` - Line number
-- `content` - Line content
+- `line` - Line number (start line for multi-line matches)
+- `end_line` - End line number (only present for multi-line matches)
+- `content` - Matched content (may contain `\n` for multi-line matches)
 - `context_before` - Lines before match (if --context specified)
 - `context_after` - Lines after match (if --context specified)
 
