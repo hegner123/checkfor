@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -35,6 +37,7 @@ type UpdateCache struct {
 
 type Match struct {
 	Line          int      `json:"line"`
+	EndLine       int      `json:"end_line,omitempty"`
 	Content       string   `json:"content"`
 	ContextBefore []string `json:"context_before,omitempty"`
 	ContextAfter  []string `json:"context_after,omitempty"`
@@ -59,6 +62,7 @@ type Result struct {
 
 type Config struct {
 	Dirs            []string
+	Files           []string
 	Search          string
 	Ext             string
 	Exclude         []string
@@ -163,11 +167,13 @@ func main() {
 func parseFlags() Config {
 	config := Config{}
 	var dirStr string
+	var fileStr string
 	var excludeStr string
 
 	flag.BoolVar(&config.Update, "update", false, "Update checkfor to the latest version")
 	flag.BoolVar(&config.CLIMode, "cli", false, "Run in CLI mode (default is MCP server mode)")
 	flag.StringVar(&dirStr, "dir", "", "Comma-separated list of directories to search (defaults to current directory)")
+	flag.StringVar(&fileStr, "file", "", "Comma-separated list of files to search")
 	flag.StringVar(&config.Search, "search", "", "String to search for (required)")
 	flag.StringVar(&config.Ext, "ext", "", "File extension to filter (e.g., .go, .rtf)")
 	flag.StringVar(&excludeStr, "exclude", "", "Comma-separated list of strings to exclude from results")
@@ -183,7 +189,17 @@ func parseFlags() Config {
 		for i := range config.Dirs {
 			config.Dirs[i] = strings.TrimSpace(config.Dirs[i])
 		}
-	} else {
+	}
+
+	if fileStr != "" {
+		config.Files = strings.Split(fileStr, ",")
+		for i := range config.Files {
+			config.Files[i] = strings.TrimSpace(config.Files[i])
+		}
+	}
+
+	// Default to current directory only if no dirs and no files specified
+	if len(config.Dirs) == 0 && len(config.Files) == 0 {
 		config.Dirs = []string{"."}
 	}
 
@@ -220,6 +236,15 @@ func runCLI(config Config) {
 }
 
 func runMCPServer() {
+	// Handle OS signals for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		os.Exit(0)
+	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -235,6 +260,9 @@ func runMCPServer() {
 
 		handleRequest(req)
 	}
+
+	// Scanner finished - stdin closed or EOF, exit gracefully
+	// Don't log anything to stderr on clean shutdown
 }
 
 func handleRequest(req JSONRPCRequest) {
@@ -273,17 +301,21 @@ func handleToolsList(req JSONRPCRequest) {
 		Tools: []Tool{
 			{
 				Name:        "checkfor",
-				Description: "Search files in directories for a string pattern. Single-depth (non-recursive) scanning with optional extension filtering, case-insensitive search, whole-word matching, and context lines.",
+				Description: "Search files in directories for a string pattern. Single-depth (non-recursive) scanning with optional extension filtering, case-insensitive search, whole-word matching, context lines, and multi-line search.",
 				InputSchema: InputSchema{
 					Type: "object",
 					Properties: map[string]Property{
 						"dir": {
 							Type:        "array",
-							Description: "Array of directory paths to search. Can also accept a single string for backwards compatibility. Defaults to current directory if not provided.",
+							Description: "Array of directory paths to search. Can also accept a single string for backwards compatibility. Defaults to current directory if neither dir nor file is provided.",
+						},
+						"file": {
+							Type:        "array",
+							Description: "Array of file paths to search directly. Can also accept a single string. Bypasses directory scanning.",
 						},
 						"search": {
 							Type:        "string",
-							Description: "String pattern to search for",
+							Description: "String pattern to search for. Supports multi-line search: \\n in the string matches literal newlines spanning multiple lines.",
 						},
 						"ext": {
 							Type:        "string",
@@ -358,7 +390,22 @@ func handleToolsCall(req JSONRPCRequest) {
 		}
 	}
 
-	if len(config.Dirs) == 0 {
+	if fileParam, exists := params.Arguments["file"]; exists {
+		switch v := fileParam.(type) {
+		case string:
+			config.Files = []string{v}
+		case []any:
+			config.Files = make([]string, 0, len(v))
+			for _, f := range v {
+				if str, ok := f.(string); ok {
+					config.Files = append(config.Files, str)
+				}
+			}
+		}
+	}
+
+	// Default to current directory only if no dirs and no files specified
+	if len(config.Dirs) == 0 && len(config.Files) == 0 {
 		config.Dirs = []string{"."}
 	}
 
@@ -611,7 +658,7 @@ func saveUpdateCache(cache *UpdateCache) error {
 
 func searchDirectories(config Config) (*Result, error) {
 	result := &Result{
-		Directories: make([]DirectoryResult, 0, len(config.Dirs)),
+		Directories: make([]DirectoryResult, 0, len(config.Dirs)+1),
 	}
 
 	for _, dir := range config.Dirs {
@@ -623,7 +670,51 @@ func searchDirectories(config Config) (*Result, error) {
 		result.Directories = append(result.Directories, *dirResult)
 	}
 
+	// Handle direct file searches
+	if len(config.Files) > 0 {
+		fileResult, err := searchFiles(config)
+		if err != nil {
+			return nil, err
+		}
+		result.Directories = append(result.Directories, *fileResult)
+	}
+
 	return result, nil
+}
+
+func searchFiles(config Config) (*DirectoryResult, error) {
+	dirResult := &DirectoryResult{
+		Dir:   "(files)",
+		Files: make([]FileMatch, 0),
+	}
+
+	for _, filePath := range config.Files {
+		// Apply extension filter if specified
+		if config.Ext != "" && !strings.HasSuffix(filePath, config.Ext) {
+			continue
+		}
+
+		matches, originalCount, filteredCount, err := searchFile(filePath, config)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to search %s: %v\n", filePath, err)
+			continue
+		}
+
+		if !config.HideFilterStats && len(config.Exclude) > 0 {
+			dirResult.OriginalMatches += originalCount
+			dirResult.FilteredMatches += filteredCount
+		}
+
+		if len(matches) > 0 {
+			dirResult.Files = append(dirResult.Files, FileMatch{
+				Path:    filePath,
+				Matches: matches,
+			})
+			dirResult.MatchesFound += len(matches)
+		}
+	}
+
+	return dirResult, nil
 }
 
 func searchDirectory(dir string, config Config) (*DirectoryResult, error) {
@@ -672,7 +763,162 @@ func searchDirectory(dir string, config Config) (*DirectoryResult, error) {
 	return dirResult, nil
 }
 
+func isMultiline(search string) bool {
+	return strings.Contains(search, "\n")
+}
+
+// indexOfWholeWord finds the first whole-word occurrence of word in text,
+// returning the byte index or -1 if not found.
+func indexOfWholeWord(text, word string) int {
+	offset := 0
+	for {
+		idx := strings.Index(text[offset:], word)
+		if idx == -1 {
+			return -1
+		}
+
+		actualIdx := offset + idx
+
+		beforeOk := actualIdx == 0 || !isWordChar(rune(text[actualIdx-1]))
+		afterIdx := actualIdx + len(word)
+		afterOk := afterIdx >= len(text) || !isWordChar(rune(text[afterIdx]))
+
+		if beforeOk && afterOk {
+			return actualIdx
+		}
+
+		offset = actualIdx + 1
+	}
+}
+
+func searchFileMultiline(path string, config Config) ([]Match, int, int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	content := string(data)
+
+	// Detect line ending style
+	lineEnding := "\n"
+	if strings.Contains(content, "\r\n") {
+		lineEnding = "\r\n"
+	}
+
+	// Normalize search string to match file's line endings
+	search := config.Search
+	if lineEnding == "\r\n" {
+		search = strings.ReplaceAll(search, "\n", "\r\n")
+	}
+
+	searchTerm := search
+	contentToSearch := content
+	if config.CaseInsensitive {
+		searchTerm = strings.ToLower(search)
+		contentToSearch = strings.ToLower(content)
+	}
+
+	// Split content into lines for context extraction
+	lines := strings.Split(content, lineEnding)
+
+	var matches []Match
+	originalCount := 0
+	filteredCount := 0
+
+	offset := 0
+	for {
+		var idx int
+		if config.WholeWord {
+			idx = indexOfWholeWord(contentToSearch[offset:], searchTerm)
+		} else {
+			idx = strings.Index(contentToSearch[offset:], searchTerm)
+		}
+
+		if idx == -1 {
+			break
+		}
+
+		actualIdx := offset + idx
+		matchEnd := actualIdx + len(searchTerm)
+
+		originalCount++
+
+		// Extract matched content from original (preserving case)
+		matchedContent := content[actualIdx:matchEnd]
+
+		// Determine start and end line numbers
+		startLine := strings.Count(content[:actualIdx], "\n") + 1
+		endLine := startLine
+		if matchEnd > actualIdx {
+			endLine = strings.Count(content[:matchEnd-1], "\n") + 1
+		}
+
+		// Check exclude patterns against all lines the match spans
+		excluded := false
+		if len(config.Exclude) > 0 {
+			// Find the start of the first line containing the match
+			lineStart := strings.LastIndex(content[:actualIdx], lineEnding)
+			if lineStart == -1 {
+				lineStart = 0
+			} else {
+				lineStart += len(lineEnding)
+			}
+
+			// Find the end of the last line containing the match
+			lineEndPos := strings.Index(content[matchEnd:], lineEnding)
+			if lineEndPos == -1 {
+				lineEndPos = len(content)
+			} else {
+				lineEndPos = matchEnd + lineEndPos
+			}
+
+			spanningLines := content[lineStart:lineEndPos]
+
+			for _, excludePattern := range config.Exclude {
+				patternToCheck := excludePattern
+				linesToCheck := spanningLines
+				if config.CaseInsensitive {
+					patternToCheck = strings.ToLower(excludePattern)
+					linesToCheck = strings.ToLower(spanningLines)
+				}
+				if strings.Contains(linesToCheck, patternToCheck) {
+					excluded = true
+					break
+				}
+			}
+		}
+
+		if excluded {
+			filteredCount++
+		} else {
+			match := Match{
+				Line:    startLine,
+				Content: matchedContent,
+			}
+
+			if startLine != endLine {
+				match.EndLine = endLine
+			}
+
+			if config.Context > 0 {
+				match.ContextBefore = getContextBefore(lines, startLine-1, config.Context)
+				match.ContextAfter = getContextAfter(lines, endLine-1, config.Context)
+			}
+
+			matches = append(matches, match)
+		}
+
+		offset = matchEnd
+	}
+
+	return matches, originalCount, filteredCount, nil
+}
+
 func searchFile(path string, config Config) ([]Match, int, int, error) {
+	if isMultiline(config.Search) {
+		return searchFileMultiline(path, config)
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, 0, 0, err
