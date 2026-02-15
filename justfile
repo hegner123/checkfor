@@ -12,3 +12,6 @@ clean:
 
 test:
     go test -v
+
+test-ci:
+    go test -v -race -coverprofile="coverage.out" -covermode=atomic
