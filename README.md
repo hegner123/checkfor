@@ -378,3 +378,10 @@ See [detailed case study](docs/CASE_STUDY.md) for full analysis with real-world 
 
 - `0` - Success (matches found or not)
 - `1` - Error (invalid arguments, directory not found, etc.)
+
+## Platform Support
+
+- macOS
+- Linux
+
+Windows is not supported.

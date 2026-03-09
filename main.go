@@ -266,14 +266,23 @@ func runMCPServer() {
 }
 
 func handleRequest(req JSONRPCRequest) {
+	// JSON-RPC 2.0: notifications (no id) must not receive a response
+	isNotification := req.ID == nil
+
 	switch req.Method {
 	case "initialize":
 		handleInitialize(req)
+	case "notifications/initialized":
+		// MCP lifecycle notification, no response required
+		return
 	case "tools/list":
 		handleToolsList(req)
 	case "tools/call":
 		handleToolsCall(req)
 	default:
+		if isNotification {
+			return
+		}
 		sendError(req.ID, -32601, "Method not found")
 	}
 }
