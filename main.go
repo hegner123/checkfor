@@ -527,7 +527,8 @@ func checkForUpdatesBackground() {
 		LastCheck:   time.Now(),
 		LastVersion: latestVersion,
 	}
-	_ = saveUpdateCache(cache) // Ignore errors
+	//nolint:errcheck // best-effort cache save during background update check
+	saveUpdateCache(cache)
 }
 
 func runUpdate() {
@@ -579,7 +580,7 @@ func fetchLatestVersion() (version, url string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck // read-only HTTP response body
 
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
@@ -607,10 +608,10 @@ func compareVersions(v1, v2 string) int {
 		var n1, n2 int
 
 		if i < len(parts1) {
-			n1, _ = strconv.Atoi(parts1[i])
+			n1, _ = strconv.Atoi(parts1[i]) //nolint:errcheck // non-numeric segments treated as 0
 		}
 		if i < len(parts2) {
-			n2, _ = strconv.Atoi(parts2[i])
+			n2, _ = strconv.Atoi(parts2[i]) //nolint:errcheck // non-numeric segments treated as 0
 		}
 
 		if n1 > n2 {
